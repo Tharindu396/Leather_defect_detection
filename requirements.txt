@@ -1,0 +1,15 @@
+# Live leather-defect detection GUI — Python dependencies
+#
+# IMPORTANT — TensorFlow / Keras version:
+#   Your Calculator.ipynb uses Keras 3.x (the `import keras as _keras` pattern
+#   and the Dense quantization_config monkey-patch). That means you need either:
+#       tensorflow >= 2.16  (which bundles Keras 3 by default), OR
+#       tensorflow + keras 3.x explicitly
+#   If your saved .keras model was produced with the bundled TF/Keras you have
+#   today, install the SAME version here — otherwise loading may fail with
+#   layer-config errors.
+
+PyQt5
+opencv-python
+numpy
+tensorflow
