@@ -11,8 +11,7 @@ Layout:
     |                  status bar                          |
     +------------------------------------------------------+
 
-Run:
-    python gui.py
+Entry point lives in `main.py` at the project root.
 """
 from __future__ import annotations
 
@@ -24,9 +23,9 @@ from __future__ import annotations
 # Importing `detector` first lets it set TF env vars and load tensorflow
 # against the system MSVC runtime; PyQt5/cv2 then reuse the already-resolved
 # runtime in-process.
-# Do NOT reorder these imports without testing `python gui.py` on Windows.
+# Do NOT reorder these imports without testing on Windows.
 # --------------------------------------------------------------------------
-from detector import (  # noqa: E402  (intentional: must precede PyQt5/cv2)
+from .detector import (  # noqa: E402  (intentional: must precede PyQt5/cv2)
     CLASS_COLORS_RGB,
     CLASS_NAMES,
     DEFECT_CLASS_NAMES,
@@ -36,15 +35,14 @@ from detector import (  # noqa: E402  (intentional: must precede PyQt5/cv2)
 # Standard library
 import json
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# Third-party (safe now that TF is already loaded)
+# Third-party (safe now that TF is already loaded above)
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -67,8 +65,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-# Local (the rest)
-from worker import DetectionSettings, DetectionWorker, SourceType
+# Local (the rest) — relative because we live in the `src` package
+from .worker import DetectionSettings, DetectionWorker, SourceType
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +157,7 @@ class ClassStatRow(QWidget):
 # Main window
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, initial_model_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("Leather Defect Detection — Live")
         self.resize(1280, 800)
@@ -175,9 +173,21 @@ class MainWindow(QMainWindow):
 
         self._pass_fail_threshold: float = 1.0  # %
 
+        # Default snapshot dir: <project_root>/snapshots if it exists
+        project_root = Path(__file__).resolve().parent.parent
+        default_snap = project_root / "snapshots"
+        self._default_snapshot_dir: str = (
+            str(default_snap) if default_snap.exists() else ""
+        )
+
         # Build UI --------------------------------------------------------
         self._build_ui()
         self._update_button_states()
+
+        # Auto-load model on startup if a path was resolved upstream -----
+        if initial_model_path:
+            # Defer until after the event loop starts so the window paints first.
+            QTimer.singleShot(100, lambda: self._load_model_from_path(initial_model_path))
 
     # ==================================================================
     # UI construction
@@ -219,7 +229,7 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(group)
 
         self.btn_load_model = QPushButton("Load model (.keras)…")
-        self.btn_load_model.clicked.connect(self._on_load_model)
+        self.btn_load_model.clicked.connect(self._on_load_model_clicked)
         v.addWidget(self.btn_load_model)
 
         self.lbl_model = QLabel("<i>No model loaded</i>")
@@ -454,16 +464,25 @@ class MainWindow(QMainWindow):
             self.lbl_file.setToolTip(path)
 
     # ==================================================================
-    # Model loading
+    # Model loading — shared between manual button and CLI auto-load
     # ==================================================================
-    def _on_load_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load Keras model", "", "Keras model (*.keras *.h5)",
-        )
-        if not path:
-            return
+    def _on_load_model_clicked(self) -> None:
+        # Open dialog at the project's models/ folder if it exists.
+        start_dir = ""
+        project_root = Path(__file__).resolve().parent.parent
+        models_dir = project_root / "models"
+        if models_dir.exists():
+            start_dir = str(models_dir)
 
-        self._set_status("Loading model… (this can take 10–30 seconds)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Keras model", start_dir, "Keras model (*.keras *.h5)",
+        )
+        if path:
+            self._load_model_from_path(path)
+
+    def _load_model_from_path(self, path: str) -> None:
+        """Shared model-loading logic. Used by both the button and CLI auto-load."""
+        self._set_status(f"Loading model: {os.path.basename(path)} … (10–30 s)")
         QApplication.processEvents()
         try:
             self.detector = LeatherDefectDetector(path)
@@ -540,7 +559,6 @@ class MainWindow(QMainWindow):
         self._last_stats = stats
         self._refresh_view()
         self._refresh_stats_display()
-        # Enable the snapshot button now that we have data.
         self.btn_snapshot.setEnabled(True)
 
     def _on_worker_error(self, msg: str) -> None:
@@ -549,8 +567,6 @@ class MainWindow(QMainWindow):
 
     def _on_worker_finished(self) -> None:
         self._set_status("Finished.")
-        # Don't drop self.worker here — _on_stop already does it cleanly.
-        # But we *do* need to refresh button states for end-of-video case.
         self._update_button_states()
 
     def _on_fps_updated(self, fps: float) -> None:
@@ -561,7 +577,7 @@ class MainWindow(QMainWindow):
         self._refresh_stats_display()
 
     # ==================================================================
-    # Display refresh (called whenever cached state or display settings change)
+    # Display refresh
     # ==================================================================
     def _current_class_visibility(self):
         return tuple(cb.isChecked() for cb in self.class_checkboxes)
@@ -609,13 +625,11 @@ class MainWindow(QMainWindow):
             self.lbl_mm2.setText("Area: — mm²  (set sample W/H)")
             self.lbl_mm2.setStyleSheet("color: #666;")
 
-        # Per-class rows
         for name, row in self.class_rows.items():
             pct = s["per_class_pct"].get(name, 0.0)
             px = s["per_class_px"].get(name, 0)
             row.update_stats(pct, px)
 
-        # Pass / Fail badge
         if s["defect_pct"] >= self._pass_fail_threshold:
             self._set_verdict(f"FAIL  ({s['defect_pct']:.2f}%)", "#b32424")
         else:
@@ -633,9 +647,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Nothing to save", "No frame available yet.")
             return
 
-        dir_path = QFileDialog.getExistingDirectory(self, "Choose snapshot folder")
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "Choose snapshot folder", self._default_snapshot_dir,
+        )
         if not dir_path:
             return
+        # Remember the user's choice within this session.
+        self._default_snapshot_dir = dir_path
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = Path(dir_path) / f"snapshot_{stamp}"
@@ -680,15 +698,3 @@ class MainWindow(QMainWindow):
             self.worker.stop()
             self.worker.wait(2000)
         event.accept()
-
-
-def main() -> None:
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")  # consistent look across platforms
-    win = MainWindow()
-    win.show()
-    sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()

@@ -13,13 +13,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from detector import LeatherDefectDetector
+from .detector import LeatherDefectDetector
 
 
 # ---------------------------------------------------------------------------
