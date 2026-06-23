@@ -174,26 +174,48 @@ class LeatherDefectDetector:
         self.model = _load_with_dense_patch(model_path)
         self._warmed: bool = False
 
+        # Derive the expected input channel count from the model itself, so
+        # this class stays correct if the model is ever re-exported with a
+        # different channel layout. Falls back to 3 if introspection fails.
+        try:
+            in_channels = int(self.model.input_shape[-1])
+            if in_channels not in (1, 3):
+                in_channels = 3
+        except (AttributeError, TypeError, IndexError):
+            in_channels = 3
+        self._in_channels: int = in_channels
+
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
     def warmup(self) -> None:
         """Run one dummy prediction so the first real frame doesn't stall on
         TF graph compilation. Cheap (~0.5-3 s on CPU, faster on GPU)."""
-        dummy = np.zeros((1, IMG_SIZE[0], IMG_SIZE[1], 1), dtype=np.float32)
+        dummy = np.zeros(
+            (1, IMG_SIZE[0], IMG_SIZE[1], self._in_channels), dtype=np.float32,
+        )
         _ = self.model(dummy, training=False)
         self._warmed = True
 
-    @staticmethod
-    def preprocess(bgr_frame: np.ndarray) -> np.ndarray:
-        """BGR uint8 frame -> (1, 256, 256, 1) float32 tensor in [0, 1]."""
+    def preprocess(self, bgr_frame: np.ndarray) -> np.ndarray:
+        """BGR uint8 frame -> (1, 256, 256, C) float32 tensor in [0, 1],
+        where C is the model's expected input-channel count (1 or 3).
+
+        For C == 3, the grayscale plane is replicated across all three
+        channels — bit-identical to what `load_sample` does in the training
+        notebook. No chrominance information is introduced.
+        """
         if bgr_frame.ndim == 3:
             gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
         else:
             gray = bgr_frame
         gray = cv2.resize(gray, IMG_SIZE, interpolation=cv2.INTER_LINEAR)
         gray = gray.astype(np.float32) / 255.0
-        return gray[np.newaxis, ..., np.newaxis]
+
+        tensor = gray[np.newaxis, ..., np.newaxis]  # (1, 256, 256, 1)
+        if self._in_channels == 3:
+            tensor = np.repeat(tensor, 3, axis=-1)  # (1, 256, 256, 3)
+        return tensor
 
     def predict(self, bgr_frame: np.ndarray) -> Tuple[np.ndarray, Dict]:
         """Run inference on a single BGR frame.
