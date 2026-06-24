@@ -230,7 +230,10 @@ class LeatherDefectDetector:
 
         # Direct call (NOT model.predict) — significantly faster for
         # single-batch inference; avoids the tf.data and progress-bar overhead.
-        probs = self.model(tensor, training=False).numpy()[0]  # (256, 256, 6)
+        raw = self.model(tensor, training=False)
+        if isinstance(raw, list):
+            raw = raw[0]
+        probs = raw.numpy()[0]  # (256, 256, 6)
         small_mask = np.argmax(probs, axis=-1).astype(np.uint8)
 
         # Nearest-neighbour upscaling preserves crisp class boundaries
